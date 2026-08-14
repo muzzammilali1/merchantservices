@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  STAFF
+}
+
+enum PaymentStatus {
+  RECEIVED
+  NOT_RECEIVED
+  PENDING
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  name               String
+  email              String    @unique
+  passwordHash       String
+  role               UserRole
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(true)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  createdMerchants   Merchant[]            @relation("MerchantCreatedBy")
+  createdGateways    Gateway[]             @relation("GatewayCreatedBy")
+  createdRates       MerchantGatewayRate[] @relation("RateCreatedBy")
+  createdPayments    Payment[]             @relation("PaymentCreatedBy")
+  updatedPayments    Payment[]             @relation("PaymentUpdatedBy")
+  auditLogs          AuditLog[]            @relation("AuditChangedBy")
+  rateRecalculations RateRecalculation[]   @relation("RecalcChangedBy")
+}
+
+model Merchant {
+  id           String   @id @default(cuid())
+  merchantCode String   @unique
+  name         String   @unique
+  active       Boolean  @default(true)
+  createdById  String
+  createdBy    User     @relation("MerchantCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  gatewayRates MerchantGatewayRate[]
+  payments     Payment[]
+}
+
+model Gateway {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  active      Boolean  @default(true)
+  createdById String
+  createdBy   User     @relation("GatewayCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  merchantRates MerchantGatewayRate[]
+  payments      Payment[]
+}
+
+// Historized rate per (merchant, gateway) pair. A new row is opened and the
+// previous row's effectiveTo is closed whenever a rate changes, so "what
+// rate applied on date X" is always answerable without touching payments.
+model MerchantGatewayRate {
+  id            String    @id @default(cuid())
+  merchantId    String
+  merchant      Merchant  @relation(fields: [merchantId], references: [id])
+  gatewayId     String
+  gateway       Gateway   @relation(fields: [gatewayId], references: [id])
+  percentage    Decimal   @db.Decimal(5, 2)
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  createdById   String
+  createdBy     User      @relation("RateCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
+
+  recalculations RateRecalculation[]
+
+  @@index([merchantId, gatewayId, effectiveTo])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  merchantId  String
+  merchant    Merchant      @relation(fields: [merchantId], references: [id])
+  gatewayId   String
+  gateway     Gateway       @relation(fields: [gatewayId], references: [id])
+  grossAmount Decimal       @db.Decimal(14, 2)
+  status      PaymentStatus @default(PENDING)
+
+  // Rate captured at submission time (or overwritten by an explicit
+  // retroactive recalculation) — never silently recomputed from the
+  // merchant's current rate.
+  rateSnapshot Decimal @db.Decimal(5, 2)
+
+  // Only populated when status = RECEIVED; null otherwise (displayed as "—").
+  deductionAmount Decimal? @db.Decimal(14, 2)
+  netAmount       Decimal? @db.Decimal(14, 2)
+
+  notes       String?
+  submittedAt DateTime @default(now())
+
+  createdById String
+  createdBy   User    @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  updatedById String?
+  updatedBy   User?   @relation("PaymentUpdatedBy", fields: [updatedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantId, status])
+  @@index([gatewayId])
+  @@index([submittedAt])
+}
+
+// Generic audit trail covering edits to merchants, gateways, rates, and payments.
+model AuditLog {
+  id           String   @id @default(cuid())
+  entityType   String
+  entityId     String
+  fieldChanged String
+  oldValue     String?
+  newValue     String?
+  note         String?
+  changedById  String
+  changedBy    User     @relation("AuditChangedBy", fields: [changedById], references: [id])
+  changedAt    DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
+
+// Groups a bulk retroactive rate change so the affected payment count and
+// before/after rates are traceable as a single event.
+model RateRecalculation {
+  id                    String              @id @default(cuid())
+  merchantGatewayRateId String
+  merchantGatewayRate   MerchantGatewayRate @relation(fields: [merchantGatewayRateId], references: [id])
+  oldPercentage         Decimal             @db.Decimal(5, 2)
+  newPercentage         Decimal             @db.Decimal(5, 2)
+  appliedRetroactively  Boolean
+  paymentsAffectedCount Int                 @default(0)
+  changedById           String
+  changedBy             User                @relation("RecalcChangedBy", fields: [changedById], references: [id])
+  changedAt             DateTime            @default(now())
+}
